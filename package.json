@@ -19,5 +19,8 @@
   },
   "imports": {
     "#*": "./src/*"
+  },
+  "dependencies": {
+    "puppeteer": "^24.8.0"
   }
 }
