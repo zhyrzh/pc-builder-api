@@ -1,6 +1,15 @@
+require("dotenv").config();
 import puppeteer, { ElementFor } from "puppeteer";
 
 (async () => {
+  const productCardSelector = ".text-center.rounded-lg.bg-white.p-2";
+  const productTitleSelector = ".text-title-2.text-left";
+  const productPriceSelector = "div span.text-md.text-gray-900";
+  const productImageSelector = "img";
+  const productBrandSelector = "div.grid.grid-cols-2 h3";
+  const nextButtonSelector =
+    "div.flex.justify-center nav[aria-label='Page navigation example'] li:last-child";
+
   const browser = await puppeteer.launch();
   const page = await browser.newPage();
 
@@ -12,7 +21,7 @@ import puppeteer, { ElementFor } from "puppeteer";
 
   while (true) {
     const productCount = await page.$$eval(
-      ".text-center.rounded-lg.bg-white.p-2",
+      productCardSelector,
       (products) => products.length
     );
 
@@ -20,29 +29,25 @@ import puppeteer, { ElementFor } from "puppeteer";
       break;
     }
 
-    const producList = await page.$$eval(
-      ".text-center.rounded-lg.bg-white.p-2",
-      (products) =>
-        products.map((itm) => ({
-          title: itm.querySelector(".text-title-2.text-left")?.textContent,
-          price: Number.parseFloat(
-            itm
-              .querySelector("div span.text-md.text-gray-900")
-              ?.textContent.replace("₱ ", "")
-              .replace(",", "")
-          ),
-          image: `https://www.pchubonline.com${itm
-            .querySelector("img")
-            ?.getAttribute("src")}`,
-          brand: itm
-            .querySelector("div.grid.grid-cols-2 h3")
-            ?.textContent.replace("● ", ""),
-        }))
+    const producList = await page.$$eval(productCardSelector, (products) =>
+      products.map((itm) => ({
+        name: itm.querySelector(productTitleSelector)?.textContent,
+        price: Number.parseFloat(
+          itm
+            .querySelector(productPriceSelector)
+            ?.textContent.replace("₱ ", "")
+            .replace(",", "")
+        ),
+        image: `https://www.pchubonline.com${itm
+          .querySelector(productImageSelector)
+          ?.getAttribute("src")}`,
+        brand: itm
+          .querySelector(productBrandSelector)
+          ?.textContent.replace("● ", ""),
+      }))
     );
 
-    const nextButton = await page.$(
-      "div.flex.justify-center nav[aria-label='Page navigation example'] li:last-child"
-    );
+    const nextButton = await page.$(nextButtonSelector);
 
     await Promise.all([
       page.waitForNavigation({ waitUntil: "networkidle0" }),
