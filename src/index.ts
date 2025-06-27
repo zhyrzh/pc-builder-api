@@ -3,8 +3,17 @@ import puppeteer, { Browser, Page } from "puppeteer";
 import { db } from "./db";
 import { tryCatch } from "./utils";
 import Groq from "groq-sdk";
+import util from "util";
 
 const groqClient = new Groq({ apiKey: process.env.GROQ_KEY! });
+
+const pageDefualtViewPortSettings = {
+  width: 1440,
+  height: 1000,
+  deviceScaleFactor: 1,
+  isMobile: false,
+  isLandscape: true,
+};
 
 async function initializeScrapingTools(): Promise<Browser> {
   const browser = await puppeteer.launch({
@@ -21,197 +30,320 @@ async function getAllData() {
   });
   const mainPage = await browser.newPage();
 
-  mainPage.setViewport({
-    width: 1440,
-    height: 1000,
-    deviceScaleFactor: 1,
-    isMobile: false,
-    isLandscape: true,
-  });
+  const allProducts: {
+    originalName: string;
+    price: string;
+    image: string;
+    link: string;
+    identifier: string;
+    brand: string;
+    manufacturer: string;
+    memory?: string;
+    color?: string;
+    variant?: string;
+  }[] = [];
+
+  mainPage.setViewport(pageDefualtViewPortSettings);
 
   await mainPage.goto(
-    "https://bermorzone.com.ph/product-category/video-cards/",
+    "https://bermorzone.com.ph/product-category/video-cards/page/1",
     {
-      waitUntil: "networkidle2",
+      waitUntil: "load",
       timeout: 0,
     }
   );
 
-  const productsWithLink = await mainPage.$$eval(
-    "li.product.type-product",
-    allProductsEvalCallback
-  );
+  let lastPage = 1;
 
-  const withName = productsWithLink.map(async (p, index) => {
-    const productImageSet = new Set<string>();
-    let productVariations = [];
-    let initialProductInfo = {
-      productName: "",
-      price: "",
-      image: "",
-      brand: "",
-      manufacturer: "",
-      identifier: "",
-    };
-
-    const productPage = await browser.newPage();
-
-    productPage.setViewport({
-      width: 1440,
-      height: 1000,
-      deviceScaleFactor: 1,
-      isMobile: false,
-      isLandscape: true,
-    });
-
-    productPage.on("request", (request) => {
-      if (request.resourceType() === "image") {
-        productImageSet.add(request.url());
-      }
-    });
-
-    await productPage.goto(p.link, {
-      waitUntil: "networkidle0",
-      timeout: 0,
-    });
-
-    const { data: originalName, error: _productNameError } = await tryCatch(
-      productPage.$eval(
-        "h1.product_title.entry-title",
-        (itm) => itm.textContent
-      )
+  while (true) {
+    const productsWithLink = await mainPage.$$eval(
+      "li.product.type-product",
+      allProductsEvalCallback
     );
 
-    if (originalName !== null) {
-      initialProductInfo.productName =
-        initialRemoveUnnecessaryKeywords(originalName);
-      initialProductInfo.brand = getGpuBrand(originalName);
-      initialProductInfo.manufacturer = getManufacturer(originalName);
-      initialProductInfo.identifier = getGpuIdentifier(originalName);
-    }
+    const withLinkPriceImageVariation = productsWithLink.map(async (p) => {
+      const productImageSet = new Set<string>();
+      let productInfo: {
+        originalName: string;
+        price: string;
+        image: string;
+        link: string;
+        variation?: {
+          memory?: string;
+          color?: string;
+          variant?: string;
+          price: string;
+        }[];
+        additionalInfo?: (string | null | undefined)[];
+      } = {
+        ...p,
+        originalName: "",
+        price: "",
+        image: "",
+        additionalInfo: [],
+      };
 
-    await productPage.waitForSelector(
-      "div.woocommerce-product-gallery.woocommerce-product-gallery--with-images div.flex-viewport div[data-thumb] a img[width='600']"
-    );
+      const productPage = await browser.newPage();
 
-    const { data: productImage } = await tryCatch(
-      productPage.$eval(
-        "div.woocommerce-product-gallery.woocommerce-product-gallery--with-images div.flex-viewport div[data-thumb] a img[width='600']",
-        (itm) => itm.src
-      )
-    );
+      productPage.setViewport(pageDefualtViewPortSettings);
 
-    if (productImage !== null && productImage !== undefined) {
-      initialProductInfo.image =
-        productImage.split("/")[productImage.split("/").length - 1];
-    }
+      productPage.on("request", (request) => {
+        if (request.resourceType() === "image") {
+          productImageSet.add(request.url());
+        }
+      });
 
-    const { data: initialPriceInfoWithDiscount } = await tryCatch(
-      productPage.$eval("p.price span.electro-price ins span bdi", (itm) =>
-        itm.textContent?.toLowerCase()
-      )
-    );
+      await productPage.goto(p.link, {
+        waitUntil: "networkidle0",
+        timeout: 0,
+      });
 
-    const { data: initialPriceInfoNoDiscount } = await tryCatch(
-      productPage.$eval("p.price span.electro-price bdi", (itm) =>
-        itm.textContent?.toLowerCase()
-      )
-    );
+      const { data: originalName, error: _productNameError } = await tryCatch(
+        productPage.$eval(
+          "h1.product_title.entry-title",
+          (itm) => itm.textContent
+        )
+      );
 
-    if (
-      initialPriceInfoWithDiscount !== null &&
-      initialPriceInfoWithDiscount !== undefined
-    ) {
-      initialProductInfo.price = initialPriceInfoWithDiscount;
-    }
+      if (originalName !== null) {
+        // initialProductInfo.brand = getGpuBrand(originalName);
+        // initialProductInfo.manufacturer = getManufacturer(originalName);
+        // initialProductInfo.identifier = getGpuIdentifier(originalName);
+        productInfo.originalName = originalName;
 
-    if (
-      initialPriceInfoNoDiscount !== null &&
-      initialPriceInfoNoDiscount !== undefined
-    ) {
-      initialProductInfo.price = initialPriceInfoNoDiscount;
-    }
-
-    const { data: variations, error: _variationsError } = await tryCatch(
-      productPage.$eval("table.variations th.label", (itm) =>
-        itm.textContent?.toLowerCase()
-      )
-    );
-
-    if (variations !== null) {
-      if (
-        variations === "capacity" ||
-        variations === "memory" ||
-        variations === "version"
-      ) {
-        productVariations = await handleMemoryVariation(
-          productPage,
-          variations,
-          originalName!,
-          initialProductInfo
+        await tryCatch(
+          productPage.waitForSelector(
+            "div.woocommerce-product-gallery.woocommerce-product-gallery--with-images div[data-thumb] a img.wp-post-image"
+          ),
+          "prime" + originalName
         );
       }
-    }
 
-    if (productImageSet.size >= 1) {
-      const allImages = [...productImageSet].filter((itm) =>
-        itm.includes(initialProductInfo.image)
+      const { data: productImage } = await tryCatch(
+        productPage.$eval(
+          "div.woocommerce-product-gallery.woocommerce-product-gallery--with-images div[data-thumb] a img.wp-post-image",
+          (itm) => itm.src
+        )
       );
-      initialProductInfo.image = allImages[0];
+
+      if (productImage !== null && productImage !== undefined) {
+        productInfo.image =
+          productImage.split("/")[productImage.split("/").length - 1];
+      }
+
+      const { data: initialPriceInfoWithDiscount } = await tryCatch(
+        productPage.$eval("p.price span.electro-price ins span bdi", (itm) =>
+          itm.textContent?.toLowerCase()
+        )
+      );
+
+      const { data: initialPriceInfoNoDiscount } = await tryCatch(
+        productPage.$eval("p.price span.electro-price bdi", (itm) =>
+          itm.textContent?.toLowerCase()
+        )
+      );
+
+      if (
+        initialPriceInfoWithDiscount !== null &&
+        initialPriceInfoWithDiscount !== undefined
+      ) {
+        productInfo.price = initialPriceInfoWithDiscount;
+      }
+
+      if (
+        initialPriceInfoNoDiscount !== null &&
+        initialPriceInfoNoDiscount !== undefined
+      ) {
+        productInfo.price = initialPriceInfoNoDiscount;
+      }
+
+      const { data: variation, error: _variationsError } = await tryCatch(
+        productPage.$eval("table.variations th.label", (itm) =>
+          itm.textContent?.toLowerCase()
+        )
+      );
+
+      const MEMORY_VARIATION_LABEL = ["capacity", "memory", "version"];
+
+      if (
+        variation !== null &&
+        originalName !== null &&
+        variation !== undefined
+      ) {
+        let variationProp: "memory" | "color" | "variant" | undefined;
+        if (MEMORY_VARIATION_LABEL.some((m) => m.toLowerCase() === variation)) {
+          variationProp = "memory";
+        }
+
+        if (variation.toLowerCase() === "color") {
+          variationProp = "color";
+        }
+
+        if (variation.toLowerCase() === "variant") {
+          variationProp = "variant";
+        }
+
+        if (variationProp !== undefined) {
+          productInfo.variation = await handleMemoryVariation(
+            productPage,
+            variation,
+            originalName,
+            variationProp
+          );
+        }
+      }
+
+      const { data: additionalInfo, error: _additionalInfoError } =
+        await tryCatch(
+          productPage.$$eval(
+            "div.woocommerce-tabs.wc-tabs-wrapper div.woocommerce-Tabs-panel.woocommerce-Tabs-panel--description.panel.entry-content.wc-tab div.electro-description.clearfix table tbody tr",
+            (trs) =>
+              trs.map((itm) => {
+                const prop = itm.querySelectorAll("td")[0].textContent;
+                if (prop !== null && prop !== undefined) {
+                  if (
+                    prop.toLowerCase().includes("memory") ||
+                    prop.toLowerCase().includes("power")
+                  )
+                    return `${itm.querySelectorAll("td")[0].textContent}=${
+                      itm.querySelectorAll("td")[1].textContent
+                    }: `;
+                }
+              })
+          )
+        );
+
+      if (additionalInfo !== null) {
+        productInfo.additionalInfo = additionalInfo.reduce<string[]>(
+          (acc, curr) => {
+            if (curr !== null && curr !== undefined) {
+              acc.push(curr);
+            }
+            return acc;
+          },
+          []
+        );
+      }
+
+      if (productImageSet.size >= 1) {
+        const allImages = [...productImageSet].filter((itm) =>
+          itm.includes(productInfo.image)
+        );
+        productInfo.image = allImages[0];
+      }
+
+      await productPage.close();
+
+      return productInfo;
+    });
+
+    // includes array items containing products with variation
+    const withLinkPriceImageVariationResolved = await Promise.all(
+      withLinkPriceImageVariation
+    );
+
+    const withAllDetails = withLinkPriceImageVariationResolved.reduce<
+      {
+        originalName: string;
+        price: string;
+        image: string;
+        link: string;
+        identifier: string;
+        brand: string;
+        manufacturer: string;
+        memory?: string;
+        color?: string;
+        variant?: string;
+      }[]
+    >((acc, curr) => {
+      const identifier = getGpuIdentifier(curr.originalName);
+      const manufacturer = getManufacturer(curr.originalName);
+      const brand = getGpuBrand(curr.originalName);
+      const info = {
+        ...curr,
+        identifier,
+        manufacturer,
+        brand,
+      };
+
+      delete info.variation;
+
+      if (curr.variation !== undefined) {
+        if (curr.variation.every((v) => v.memory !== undefined)) {
+          for (let variation of curr.variation) {
+            acc.push({
+              ...info,
+              memory: variation.memory,
+              price: variation.price,
+            });
+          }
+        }
+        if (curr.variation.every((v) => v.color !== undefined)) {
+          for (let variation of curr.variation) {
+            acc.push({
+              ...info,
+              color: variation.color,
+              price: variation.price,
+            });
+          }
+        }
+        if (curr.variation.every((v) => v.variant !== undefined)) {
+          for (let variation of curr.variation) {
+            acc.push({
+              ...info,
+              variant: variation.variant,
+              price: variation.price,
+            });
+          }
+        }
+      } else {
+        acc.push({
+          ...curr,
+          identifier,
+          manufacturer,
+          brand,
+        });
+      }
+
+      return acc;
+    }, []);
+    lastPage += 1;
+
+    console.log(withAllDetails, lastPage, "withAllDetails");
+    allProducts.concat(withAllDetails);
+
+    const { data: nextButton } = await tryCatch(
+      mainPage.$("nav.electro-advanced-pagination a.next.page-numbers"),
+      "nextb"
+    );
+    if (nextButton !== null) {
+      await Promise.all([
+        mainPage.waitForNavigation({
+          waitUntil: "networkidle0",
+          timeout: 0,
+        }),
+        nextButton.click(),
+      ]);
+    } else {
+      break;
     }
+  }
 
-    await productPage.close();
-
-    const returnedObj = {
-      ...p,
-      ...initialProductInfo,
-      originalName,
-      productName: finalRemovalUnnecessaryKeywords(
-        initialProductInfo.productName
-      ),
-    };
-
-    if (productVariations.length >= 2) {
-      productVariations = productVariations.map((itm) => ({
-        ...itm,
-        image: initialProductInfo.image,
-      }));
-    }
-
-    return productVariations.length >= 2 ? productVariations : returnedObj;
-  });
-
-  // includes array items containing products with variation
-  const productListWithVariations = await Promise.all(withName);
-
-  // flattened items with variation
-  const productList = productListWithVariations.reduce((acc, curr) => {
-    return acc?.concat(Array.isArray(curr) ? curr : [curr]);
-  }, []);
-
-  console.log(productListWithVariations, "product w variation");
-
-  await mainPage.screenshot({
-    path: "mainpage-all-items.png",
-    fullPage: true,
-  });
+  console.log(
+    util.inspect(allProducts, { depth: null }),
+    "product w variation"
+  );
 }
 
 async function handleMemoryVariation(
   productPage: Page,
   variations: string,
   originalName: string,
-  productInfo: {
-    productName: string;
-    image: string;
-    price: string;
-    brand: string;
-  }
-): Promise<Array<any>> {
-  let productName = productInfo.productName;
-  let productVariations = [];
+  property: "memory" | "color" | "variant"
+): Promise<{ [property]: string; price: string }[]> {
+  let productVariations: { [property]: string; price: string }[] = [];
 
-  productName = productName.replace(/\d+GB\s*\|\s*\d+GB/g, "");
+  // productName = productName.replace(/\d+GB\s*\|\s*\d+GB/g, "");
 
   const { data: variationValuesFromSelect } = await tryCatch(
     productPage.$$eval(
@@ -224,82 +356,127 @@ async function handleMemoryVariation(
     "from variationValues"
   );
 
+  const { data: nonVariationPrice } = await tryCatch(
+    productPage.$eval("p.price span.electro-price", (p) => p.textContent)
+  );
+
   if (
     variationValuesFromSelect !== null &&
-    variationValuesFromSelect.every((vartn) => vartn !== null)
+    variationValuesFromSelect.every((v) => v !== null)
   ) {
-    let prevPriceRead = "";
-    for (let i = 0; i <= variationValuesFromSelect.length - 1; i++) {
-      Promise.all([
+    if (variationValuesFromSelect.length === 1) {
+      productVariations.push({
+        [property]: variationValuesFromSelect[0],
+        price: nonVariationPrice!,
+      });
+    } else if (variationValuesFromSelect.length === 2) {
+      for (let i = 0; i <= variationValuesFromSelect.length - 1; i++) {
+        if (nonVariationPrice !== null) {
+          const priceRange = nonVariationPrice.split(" – ");
+          if (priceRange.length === 2) {
+            productVariations.push({
+              [property]: variationValuesFromSelect[i],
+              price: priceRange[i],
+            });
+          } else {
+            const priceWithDiscount = nonVariationPrice.split(" ");
+            productVariations.push({
+              [property]: variationValuesFromSelect[i],
+              price: priceWithDiscount[0],
+            });
+          }
+        }
+      }
+    } else {
+      let prevPriceRead = "";
+      console.log(variationValuesFromSelect, "variation from selec");
+      for (let i = 0; i <= variationValuesFromSelect.length - 1; i++) {
+        Promise.all([
+          await tryCatch(
+            productPage.waitForSelector(
+              `table.variations select[id='${variations}`
+            ),
+            "3?"
+          ),
+          await tryCatch(
+            productPage.click(`table.variations select[id='${variations}']`),
+            "1?"
+          ),
+        ]);
+
+        await tryCatch(
+          productPage.select(
+            `table.variations select[id='${variations}']`,
+            variationValuesFromSelect[i]
+          ),
+          "2?"
+        );
+
+        // const { data: withDiscountPrice } = await tryCatch(
+        //   productPage.$("div.woocommerce-variation-price span.electro-price")
+        // );
+
         await tryCatch(
           productPage.waitForSelector(
-            `table.variations select[id='${variations}`
+            "div.woocommerce-variation-price span.electro-price ins span bdi"
           ),
-          "3?"
-        ),
-        await tryCatch(
-          productPage.click(`table.variations select[id='${variations}']`),
-          "1?"
-        ),
-      ]);
-
-      await tryCatch(
-        productPage.select(
-          `table.variations select[id='${variations}']`,
-          variationValuesFromSelect[i]
-        ),
-        "2?"
-      );
-
-      await tryCatch(
-        productPage.waitForSelector(
-          "div.woocommerce-variation-price span.electro-price ins span bdi"
-        ),
-        "4?"
-      );
-
-      if (prevPriceRead !== "") {
-        await productPage.waitForFunction(
-          (sel, prev) => {
-            const el = document.querySelector(sel);
-
-            return el && el.textContent!.trim() !== prev;
-          },
-          { polling: "mutation", timeout: 6000 }, // optional options
-          "div.woocommerce-variation-price span.electro-price ins span bdi",
-          prevPriceRead
+          "4?" + originalName
         );
+
+        if (prevPriceRead !== "") {
+          await productPage.waitForFunction(
+            (sel1, prev) => {
+              const el1 = document.querySelector(sel1);
+
+              return el1 && el1.textContent!.trim() !== prev;
+            },
+            { polling: "mutation", timeout: 6000 }, // optional options
+            "div.woocommerce-variation-price span.electro-price",
+            prevPriceRead
+          );
+        }
+
+        const { data: price } = await tryCatch(
+          productPage.$eval(
+            "div.woocommerce-variation-price span.electro-price",
+            (p) =>
+              p?.querySelector("ins span bdi")
+                ? p.querySelector("ins span bdi")?.textContent
+                : p.textContent
+          ),
+          `?5 ${originalName}`
+        );
+
+        const { data: evaluatorCondition } = await tryCatch(
+          productPage.$eval(
+            "div.woocommerce-variation-price span.electro-price",
+            (p) => p.textContent
+          ),
+          `?5 ${originalName}`
+        );
+        console.log(prevPriceRead, "outside");
+        if (price !== null || price !== undefined) {
+          prevPriceRead = evaluatorCondition!;
+          productVariations.push({
+            [property]: variationValuesFromSelect[i],
+            price: price!,
+          });
+        }
+
+        console.log(productVariations, "product variations");
       }
-
-      const { data: price } = await tryCatch(
-        productPage.$eval(
-          "div.woocommerce-variation-price span.electro-price ins span bdi",
-          (price) => price?.textContent
-        ),
-        `?5 ${originalName}`
-      );
-
-      if (price !== null) {
-        prevPriceRead = price;
-      }
-
-      productVariations.push({
-        ...productInfo,
-        originalName,
-        productName: `${finalRemovalUnnecessaryKeywords(productName)} ${
-          variationValuesFromSelect[i]
-        }`,
-        price,
-      });
     }
   }
+
   return productVariations;
 }
 
-const modelMatcher = /(?<=\b(?:GTX|RTX|GT)\s*)\d{3,4}\b/i;
-const familyMatcher = /\b(?:GTX|RTX|GT)\b/i;
+const modelMatcher =
+  // /(?<=\b(?:GTX|RTX|GT|RX)\s*)\d{3,4}\b|\b(?:ARC\s*)?(?:A|B)\d{3}\b/gi;
+  /(?<=\b(?:GTX|RTX|GT|RX)\s*)\d{3,4}\b|\b[AB]\d{3}\b/gi;
+const familyMatcher = /\b(?:GTX|RTX|GT|RX|ARC)\b/i;
 const nvidiaPerformanceSuffixMatcher =
-  /\b(?:TI(?:\s+SUPER)?|SUPER(?:\s+TI)?)\b/i;
+  /\b(?:TI(?:\s+SUPER)?|SUPER(?:\s+TI)?|XT(?:\s{0,1}X)?)\b/i;
 
 function getGpuIdentifier(originalName: string): string {
   let gpuNameInParts: string[] = [
@@ -365,7 +542,9 @@ const POWERCOLOR_SERIES_MATCHER =
   /\b(?:figher|spectral|hellhound|itx|liquid|devil|low|profile|reaper|red|devil|red|dragon)/gi;
 
 const XFX_SERIES_MATCHER =
-  /\b(?:speedster|swift|core|qick\s{0,1}\d{3}|merc\s{0,1}\d{3})/gi;
+  /\b(?:speedster|swift|mercury|quicksilver|qick\s{0,1}\d{3}|merc\s{0,1}\d{3}|core)/gi;
+
+const PNY_SERIES_MATCHER = /\b(?:verto|xlr8|epic-x)/gi;
 
 function getSeriesByBrand(originalName: string): string {
   let series = "";
@@ -448,6 +627,13 @@ function getSeriesByBrand(originalName: string): string {
     }
   }
 
+  if (manufacturer.toLowerCase() === "xfx") {
+    const xfxSeries = originalName.match(XFX_SERIES_MATCHER);
+    if (xfxSeries !== null && xfxSeries.length >= 1) {
+      series = seriesKeysHandler(xfxSeries);
+    }
+  }
+
   return series;
 }
 
@@ -456,7 +642,7 @@ function seriesKeysHandler(series: RegExpMatchArray): string {
   for (const key of series) {
     seriesSet.add(key.toLowerCase());
   }
-  return [...seriesSet].join(" ");
+  return [...seriesSet].join("_");
 }
 
 function getGpuBrand(originalName: string): string {
@@ -515,7 +701,7 @@ function allProductsEvalCallback(products: HTMLElement[]) {
       "div.product-loop-header.product-item__header a.woocommerce-LoopProduct-link.woocommerce-loop-product__link";
     return {
       link: product.querySelector(linkSelector)?.getAttribute("href"),
-    } as any;
+    } as { link: string };
   });
 }
 
@@ -531,3 +717,118 @@ async function benchMark() {
 }
 
 benchMark();
+
+// else {
+//           const { data: priceNoDiscount } = await tryCatch(
+//             productPage.$eval(
+//               "div.woocommerce-variation-price span.electro-price ins span bdi",
+//               (price) => price?.textContent
+//             ),
+//             "from test " + originalName
+//           );
+
+//           if (priceNoDiscount) {
+//             prevPriceRead = priceNoDiscount;
+//             productVariations.push({
+//               [property]: variationValuesFromSelect[i],
+//               price: priceNoDiscount,
+//             });
+//           }
+//         }
+
+// if (
+//     variationValuesFromSelect !== null &&
+//     variationValuesFromSelect.every((vartn) => vartn !== null)
+//   ) {
+//     let prevPriceRead = "";
+//     for (let i = 0; i <= variationValuesFromSelect.length - 1; i++) {
+//       const { data: priceRange } = await tryCatch(
+//         productPage.$eval("p.price span.electro-price", (p) => p.textContent),
+//         "has pricerange"
+//       );
+
+//       if (
+//         priceRange !== null &&
+//         priceRange !== undefined &&
+//         !priceRange.includes("–")
+//       ) {
+//         const { data: initialPriceInfoWithDiscount } = await tryCatch(
+//           productPage.$eval("p.price span.electro-price ins span bdi", (itm) =>
+//             itm.textContent?.toLowerCase()
+//           )
+//         );
+//         if (
+//           initialPriceInfoWithDiscount !== null &&
+//           initialPriceInfoWithDiscount !== undefined
+//         ) {
+//           productVariations.push({
+//             [property]: variationValuesFromSelect[i],
+//             price: initialPriceInfoWithDiscount,
+//           });
+//         }
+//       } else {
+//         Promise.all([
+//           await tryCatch(
+//             productPage.waitForSelector(
+//               `table.variations select[id='${variations}`
+//             ),
+//             "3?"
+//           ),
+//           await tryCatch(
+//             productPage.click(`table.variations select[id='${variations}']`),
+//             "1?"
+//           ),
+//         ]);
+
+//         await tryCatch(
+//           productPage.select(
+//             `table.variations select[id='${variations}']`,
+//             variationValuesFromSelect[i]
+//           ),
+//           "2?"
+//         );
+
+//         const { data: withDiscountPrice } = await tryCatch(
+//           productPage.$(
+//             "div.woocommerce-variation-price span.electro-price ins span bdi"
+//           )
+//         );
+
+//         await tryCatch(
+//           productPage.waitForSelector(
+//             "div.woocommerce-variation-price span.electro-price ins span bdi"
+//           ),
+//           "4?" + originalName
+//         );
+
+//         if (prevPriceRead !== "") {
+//           await productPage.waitForFunction(
+//             (sel, prev) => {
+//               const el = document.querySelector(sel);
+
+//               return el && el.textContent!.trim() !== prev;
+//             },
+//             { polling: "mutation", timeout: 6000 }, // optional options
+//             "div.woocommerce-variation-price span.electro-price ins span bdi",
+//             prevPriceRead
+//           );
+//         }
+
+//         const { data: price } = await tryCatch(
+//           productPage.$eval(
+//             "div.woocommerce-variation-price span.electro-price ins span bdi",
+//             (price) => price?.textContent
+//           ),
+//           `?5 ${originalName}`
+//         );
+
+//         if (price !== null) {
+//           prevPriceRead = price;
+//           productVariations.push({
+//             [property]: variationValuesFromSelect[i],
+//             price,
+//           });
+//         }
+//       }
+//     }
+//   }
