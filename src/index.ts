@@ -4,6 +4,7 @@ import { db } from "./db";
 import { tryCatch } from "./utils";
 import Groq from "groq-sdk";
 import util from "util";
+import { TGpu } from "#db/schema.js";
 
 const groqClient = new Groq({ apiKey: process.env.GROQ_KEY! });
 
@@ -15,14 +16,17 @@ const pageDefualtViewPortSettings = {
   isLandscape: true,
 };
 
-async function initializeScrapingTools(): Promise<Browser> {
-  const browser = await puppeteer.launch({
-    headless: false,
-  });
-  const page = await browser.newPage();
+type TVariation = {
+  memory?: string;
+  variant?: string;
+  color?: string;
+  price: string;
+};
 
-  return browser;
-}
+type TExtras = {
+  variation?: TVariation[]; // variation is needed to get a single item that has different price range
+  additionalInfo?: string[]; // additional info is needed to get infos not found on original name
+};
 
 async function getAllData() {
   const browser = await puppeteer.launch({
@@ -30,18 +34,7 @@ async function getAllData() {
   });
   const mainPage = await browser.newPage();
 
-  const allProducts: {
-    originalName: string;
-    price: string;
-    image: string;
-    link: string;
-    identifier: string;
-    brand: string;
-    manufacturer: string;
-    memory?: string;
-    color?: string;
-    variant?: string;
-  }[] = [];
+  const allProducts: Omit<TGpu, "created_at" | "id">[] = [];
 
   mainPage.setViewport(pageDefualtViewPortSettings);
 
@@ -53,34 +46,35 @@ async function getAllData() {
     }
   );
 
-  let lastPage = 1;
-
   while (true) {
-    const productsWithLink = await mainPage.$$eval(
-      "li.product.type-product",
-      allProductsEvalCallback
-    );
+    // const productsWithLink: Pick<TGpu, "link">[] = await mainPage.$$eval(
+    //   "li.product.type-product",
+    //   allProductsEvalCallback
+    // );
+    const productsWithLink = [
+      {
+        link: "https://bermorzone.com.ph/shop/video-cards/amd-video-cards/sapphire-pulse-amd-radeon-rx-9060-xt-8gb-16gb-gddr6-graphics-card/",
+      },
+    ];
 
-    const withLinkPriceImageVariation = productsWithLink.map(async (p) => {
+    const withOrigNameLinkPriceImageVariationAddInfo: Array<
+      Promise<
+        Pick<TGpu, "original_name" | "price" | "image" | "link"> & {
+          variation?: TVariation[];
+          additionalInfo?: string[];
+        }
+      >
+    > = productsWithLink.map(async (p) => {
       const productImageSet = new Set<string>();
-      let productInfo: {
-        originalName: string;
-        price: string;
-        image: string;
-        link: string;
-        variation?: {
-          memory?: string;
-          color?: string;
-          variant?: string;
-          price: string;
-        }[];
-        additionalInfo?: (string | null | undefined)[];
-      } = {
+      const productInfo: Pick<
+        TGpu,
+        "original_name" | "price" | "image" | "link"
+      > &
+        TExtras = {
         ...p,
-        originalName: "",
+        original_name: "",
         price: "",
         image: "",
-        additionalInfo: [],
       };
 
       const productPage = await browser.newPage();
@@ -109,7 +103,7 @@ async function getAllData() {
         // initialProductInfo.brand = getGpuBrand(originalName);
         // initialProductInfo.manufacturer = getManufacturer(originalName);
         // initialProductInfo.identifier = getGpuIdentifier(originalName);
-        productInfo.originalName = originalName;
+        productInfo.original_name = originalName;
 
         await tryCatch(
           productPage.waitForSelector(
@@ -157,38 +151,60 @@ async function getAllData() {
         productInfo.price = initialPriceInfoNoDiscount;
       }
 
-      const { data: variation, error: _variationsError } = await tryCatch(
-        productPage.$eval("table.variations th.label", (itm) =>
-          itm.textContent?.toLowerCase()
-        )
+      const { data: variations, error: _variationsError } = await tryCatch(
+        productPage.$$eval("table.variations tr", (itm) =>
+          itm.map((i) => i.querySelector("th.label label")?.getAttribute("for"))
+        ),
+        "variations"
       );
 
       const MEMORY_VARIATION_LABEL = ["capacity", "memory", "version"];
+      const VARIATION_VARIATION_LABEL = ["availability", "model"];
 
       if (
-        variation !== null &&
-        originalName !== null &&
-        variation !== undefined
+        variations !== null &&
+        variations !== undefined &&
+        variations.every((m) => m !== null) &&
+        variations.every((m) => m !== undefined) &&
+        originalName !== null
       ) {
-        let variationProp: "memory" | "color" | "variant" | undefined;
-        if (MEMORY_VARIATION_LABEL.some((m) => m.toLowerCase() === variation)) {
-          variationProp = "memory";
-        }
+        const variation = variations[0];
+        if (variations.length === 1) {
+          let variationProp: "memory" | "color" | "variant" | undefined;
+          if (
+            MEMORY_VARIATION_LABEL.some(
+              (m) =>
+                m.toLowerCase() === variation ||
+                m.toLowerCase().includes("memory")
+            )
+          ) {
+            variationProp = "memory";
+          }
 
-        if (variation.toLowerCase() === "color") {
-          variationProp = "color";
-        }
+          if (variation.toLowerCase() === "color") {
+            variationProp = "color";
+          }
 
-        if (variation.toLowerCase() === "variant") {
-          variationProp = "variant";
-        }
+          if (
+            variation.includes("varia") ||
+            VARIATION_VARIATION_LABEL.some((i) => variation === i)
+          ) {
+            variationProp = "variant";
+          }
 
-        if (variationProp !== undefined) {
-          productInfo.variation = await handleMemoryVariation(
+          if (variationProp !== undefined) {
+            productInfo.variation = await handleProductVariation(
+              productPage,
+              variation,
+              originalName,
+              variationProp
+            );
+          }
+        } else {
+          productInfo.variation = await handleMultiProductVariation(
             productPage,
-            variation,
-            originalName,
-            variationProp
+            variations,
+            originalName
           );
         }
       }
@@ -237,80 +253,41 @@ async function getAllData() {
       return productInfo;
     });
 
-    // includes array items containing products with variation
-    const withLinkPriceImageVariationResolved = await Promise.all(
-      withLinkPriceImageVariation
+    // items include original_name, price, image, link, variation?, additionalInfo?
+    const withOrigNameLinkPriceImageVariationAddInfoResolved =
+      await Promise.all(withOrigNameLinkPriceImageVariationAddInfo);
+
+    // items incldue properties from prev handling + identifier, general_model, brand, manufacturer  variation?, additionalInfo?
+    const withGenModlMnfctrIdntfrBrndMemSizeMemType =
+      withOrigNameLinkPriceImageVariationAddInfoResolved.map((p) => ({
+        ...p,
+        identifier: getGpuIdentifier(p.original_name),
+        brand: getGpuBrand(p.original_name),
+        general_model: getGeneralModel(p.original_name),
+        manufacturer: getManufacturer(p.original_name),
+        memory_size: getMemorySize(p.original_name),
+        memory_type: getMemoryType(p.original_name),
+      }));
+
+    const withUniqueVariation =
+      withGenModlMnfctrIdntfrBrndMemSizeMemType.filter(
+        (itm) =>
+          itm.variation !== undefined &&
+          itm.variation.every(
+            (i) =>
+              i.variant !== undefined && !i.variant.toLowerCase().includes("oc")
+          )
+      );
+    // .map((i) => ({
+    //   link: i.link,
+    //   original_name: i.original_name,
+    //   variation: i.variation,
+    // }));
+
+    console.log(
+      util.inspect(withGenModlMnfctrIdntfrBrndMemSizeMemType, { depth: null }),
+      "withGenModMnfctrIdntfrBrndMemSizeMemType"
     );
-
-    const withAllDetails = withLinkPriceImageVariationResolved.reduce<
-      {
-        originalName: string;
-        price: string;
-        image: string;
-        link: string;
-        identifier: string;
-        brand: string;
-        manufacturer: string;
-        memory?: string;
-        color?: string;
-        variant?: string;
-      }[]
-    >((acc, curr) => {
-      const identifier = getGpuIdentifier(curr.originalName);
-      const manufacturer = getManufacturer(curr.originalName);
-      const brand = getGpuBrand(curr.originalName);
-      const info = {
-        ...curr,
-        identifier,
-        manufacturer,
-        brand,
-      };
-
-      delete info.variation;
-
-      if (curr.variation !== undefined) {
-        if (curr.variation.every((v) => v.memory !== undefined)) {
-          for (let variation of curr.variation) {
-            acc.push({
-              ...info,
-              memory: variation.memory,
-              price: variation.price,
-            });
-          }
-        }
-        if (curr.variation.every((v) => v.color !== undefined)) {
-          for (let variation of curr.variation) {
-            acc.push({
-              ...info,
-              color: variation.color,
-              price: variation.price,
-            });
-          }
-        }
-        if (curr.variation.every((v) => v.variant !== undefined)) {
-          for (let variation of curr.variation) {
-            acc.push({
-              ...info,
-              variant: variation.variant,
-              price: variation.price,
-            });
-          }
-        }
-      } else {
-        acc.push({
-          ...curr,
-          identifier,
-          manufacturer,
-          brand,
-        });
-      }
-
-      return acc;
-    }, []);
-    lastPage += 1;
-
-    console.log(withAllDetails, lastPage, "withAllDetails");
-    allProducts.concat(withAllDetails);
 
     const { data: nextButton } = await tryCatch(
       mainPage.$("nav.electro-advanced-pagination a.next.page-numbers"),
@@ -335,9 +312,148 @@ async function getAllData() {
   );
 }
 
-async function handleMemoryVariation(
+function getGeneralModel(originalName: string): string {
+  let generalModelInParts: string[] = [];
+
+  const familyMatch = originalName.match(familyMatcher);
+  const seriesMatch = originalName.match(modelMatcher);
+  const performanceSuffixMatch = originalName.match(performanceSuffixMatcher);
+
+  if (familyMatch !== null) {
+    generalModelInParts.push(familyMatch[0]);
+  }
+
+  if (seriesMatch !== null) {
+    generalModelInParts.push(seriesMatch[0]);
+  }
+
+  if (performanceSuffixMatch !== null) {
+    generalModelInParts.push(performanceSuffixMatch[0]);
+  }
+
+  return generalModelInParts.join(" ");
+}
+
+function getMemoryType(originalName: string): string {
+  let memoryType = "";
+  const memoryTypeMatch = originalName.match(/\bGDDR\d{1,2}X?\b/i);
+
+  if (memoryTypeMatch !== null) {
+    memoryType = memoryTypeMatch[0];
+  }
+
+  return memoryType;
+}
+
+function getMemorySize(originalName: string): number {
+  let memorySize = "";
+  // const memorySizeMatch = originalName.match(/\b\d{1,2}\s*GB?\b/i);
+  const memorySizeMatch = originalName.match(/\b(\d+)\s?G[B]?\b/gi);
+
+  if (memorySizeMatch !== null) {
+    memorySize = memorySizeMatch[0];
+  }
+
+  return parseInt(memorySize);
+}
+
+async function handleMultiProductVariation(
   productPage: Page,
-  variations: string,
+  variations: string[],
+  originalName: string
+): Promise<{ variant: string; price: string }[]> {
+  let productVariations: { variant: string; price: string }[] = [];
+
+  for (const v of variations) {
+    const { data: variationValues } = await tryCatch(
+      productPage.$$eval(
+        `table.variations td.value select[id='${v}'] option`,
+        (el) =>
+          el.map((el) => el.getAttribute("value")).filter((itm) => itm !== "")
+      ),
+      "from variationValues"
+    );
+
+    if (variationValues !== null && variationValues.every((i) => i !== null)) {
+      let prevPriceRead = "";
+      for (let i = 0; i <= variationValues.length - 1; i++) {
+        Promise.all([
+          await tryCatch(
+            productPage.waitForSelector(`table.variations select[id='${v}`),
+            "3?"
+          ),
+          await tryCatch(
+            productPage.click(`table.variations select[id='${v}']`),
+            "1?"
+          ),
+        ]);
+
+        await tryCatch(
+          productPage.select(
+            `table.variations select[id='${v}']`,
+            variationValues[i]
+          ),
+          "2?"
+        );
+
+        if (!v.toLowerCase().includes("brand")) {
+          await tryCatch(
+            productPage.waitForSelector(
+              "div.woocommerce-variation-price span.electro-price ins span bdi"
+            ),
+            "4?" + originalName
+          );
+
+          if (prevPriceRead !== "") {
+            await productPage.waitForFunction(
+              (sel1, prev) => {
+                const el1 = document.querySelector(sel1);
+
+                return el1 && el1.textContent!.trim() !== prev;
+              },
+              { polling: "mutation", timeout: 6000 }, // optional options
+              "div.woocommerce-variation-price span.electro-price",
+              prevPriceRead
+            );
+          }
+
+          const { data: price } = await tryCatch(
+            productPage.$eval(
+              "div.woocommerce-variation-price span.electro-price",
+              (p) =>
+                p?.querySelector("ins span bdi")
+                  ? p.querySelector("ins span bdi")?.textContent
+                  : p.textContent
+            ),
+            `?5 ${originalName}`
+          );
+
+          const { data: evaluatorCondition } = await tryCatch(
+            productPage.$eval(
+              "div.woocommerce-variation-price span.electro-price",
+              (p) => p.textContent
+            ),
+            `?5 ${originalName}`
+          );
+
+          if (price !== null || price !== undefined) {
+            prevPriceRead = evaluatorCondition!;
+            productVariations.push({
+              variant: variationValues[i],
+              price: price!,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return productVariations;
+}
+
+async function handleProductVariation(
+  productPage: Page,
+  variation: string,
   originalName: string,
   property: "memory" | "color" | "variant"
 ): Promise<{ [property]: string; price: string }[]> {
@@ -345,9 +461,9 @@ async function handleMemoryVariation(
 
   // productName = productName.replace(/\d+GB\s*\|\s*\d+GB/g, "");
 
-  const { data: variationValuesFromSelect } = await tryCatch(
+  const { data: variationValues } = await tryCatch(
     productPage.$$eval(
-      `table.variations td.value select[id='${variations}'] option`,
+      `table.variations td.value select[id='${variation}'] option`,
       (el) =>
         el
           .map((el) => el.textContent)
@@ -360,28 +476,25 @@ async function handleMemoryVariation(
     productPage.$eval("p.price span.electro-price", (p) => p.textContent)
   );
 
-  if (
-    variationValuesFromSelect !== null &&
-    variationValuesFromSelect.every((v) => v !== null)
-  ) {
-    if (variationValuesFromSelect.length === 1) {
+  if (variationValues !== null && variationValues.every((v) => v !== null)) {
+    if (variationValues.length === 1) {
       productVariations.push({
-        [property]: variationValuesFromSelect[0],
+        [property]: variationValues[0],
         price: nonVariationPrice!,
       });
-    } else if (variationValuesFromSelect.length === 2) {
-      for (let i = 0; i <= variationValuesFromSelect.length - 1; i++) {
+    } else if (variationValues.length === 2) {
+      for (let i = 0; i <= variationValues.length - 1; i++) {
         if (nonVariationPrice !== null) {
           const priceRange = nonVariationPrice.split(" – ");
           if (priceRange.length === 2) {
             productVariations.push({
-              [property]: variationValuesFromSelect[i],
+              [property]: variationValues[i],
               price: priceRange[i],
             });
           } else {
             const priceWithDiscount = nonVariationPrice.split(" ");
             productVariations.push({
-              [property]: variationValuesFromSelect[i],
+              [property]: variationValues[i],
               price: priceWithDiscount[0],
             });
           }
@@ -389,25 +502,24 @@ async function handleMemoryVariation(
       }
     } else {
       let prevPriceRead = "";
-      console.log(variationValuesFromSelect, "variation from selec");
-      for (let i = 0; i <= variationValuesFromSelect.length - 1; i++) {
+      for (let i = 0; i <= variationValues.length - 1; i++) {
         Promise.all([
           await tryCatch(
             productPage.waitForSelector(
-              `table.variations select[id='${variations}`
+              `table.variations select[id='${variation}`
             ),
             "3?"
           ),
           await tryCatch(
-            productPage.click(`table.variations select[id='${variations}']`),
+            productPage.click(`table.variations select[id='${variation}']`),
             "1?"
           ),
         ]);
 
         await tryCatch(
           productPage.select(
-            `table.variations select[id='${variations}']`,
-            variationValuesFromSelect[i]
+            `table.variations select[id='${variation}']`,
+            variationValues[i]
           ),
           "2?"
         );
@@ -454,16 +566,14 @@ async function handleMemoryVariation(
           ),
           `?5 ${originalName}`
         );
-        console.log(prevPriceRead, "outside");
+
         if (price !== null || price !== undefined) {
           prevPriceRead = evaluatorCondition!;
           productVariations.push({
-            [property]: variationValuesFromSelect[i],
+            [property]: variationValues[i],
             price: price!,
           });
         }
-
-        console.log(productVariations, "product variations");
       }
     }
   }
@@ -473,10 +583,11 @@ async function handleMemoryVariation(
 
 const modelMatcher =
   // /(?<=\b(?:GTX|RTX|GT|RX)\s*)\d{3,4}\b|\b(?:ARC\s*)?(?:A|B)\d{3}\b/gi;
-  /(?<=\b(?:GTX|RTX|GT|RX)\s*)\d{3,4}\b|\b[AB]\d{3}\b/gi;
-const familyMatcher = /\b(?:GTX|RTX|GT|RX|ARC)\b/i;
-const nvidiaPerformanceSuffixMatcher =
-  /\b(?:TI(?:\s+SUPER)?|SUPER(?:\s+TI)?|XT(?:\s{0,1}X)?)\b/i;
+  // /(?<=\b(?:GTX|RTX|GT|RX)\s*)\d{3,4}\b|\b[AB]\d{3}\b/gi;
+  /\b(?=GTX|RTX|GT|RX)?(\d{3,4})(?=XT|TI|SUPER|OC)?|(?=ARC)?(?:A|B)\d{3}\b/gi;
+const familyMatcher = /\b(?=GTX|RTX|GT|RX)?(\d{3,4})(?=XT|TI|SUPER|OC)?/gi;
+const performanceSuffixMatcher =
+  /(?=\d{4})?(?:TI(?:\s+SUPER)?|SUPER(?:\s+TI)?|XT(?:\s{0,1}X)?)\b/i;
 
 function getGpuIdentifier(originalName: string): string {
   let gpuNameInParts: string[] = [
@@ -486,9 +597,7 @@ function getGpuIdentifier(originalName: string): string {
 
   let familyMatch = originalName.match(familyMatcher);
   let modelMatch = originalName.match(modelMatcher);
-  let performanceSuffixMatch = originalName.match(
-    nvidiaPerformanceSuffixMatcher
-  );
+  let performanceSuffixMatch = originalName.match(performanceSuffixMatcher);
 
   if (familyMatch !== null) {
     gpuNameInParts.push(familyMatch[0]);
@@ -499,7 +608,11 @@ function getGpuIdentifier(originalName: string): string {
   }
 
   if (performanceSuffixMatch !== null) {
-    gpuNameInParts.push(performanceSuffixMatch[0]);
+    let suffix = performanceSuffixMatch[0];
+    if (performanceSuffixMatch.length >= 2) {
+      suffix = performanceSuffixMatch.join("_");
+    }
+    gpuNameInParts.push(suffix);
   }
 
   const series = getSeriesByBrand(originalName);
@@ -675,7 +788,11 @@ function getGpuBrand(originalName: string): string {
 }
 
 function getManufacturer(originalName: string): string {
-  return originalName.split(" ")[0];
+  const splitted = originalName.split(" ");
+
+  return splitted.length >= 1 && splitted[0].match(/\d{1,2}G/i) === null
+    ? splitted[0]
+    : splitted[1];
 }
 
 function initialRemoveUnnecessaryKeywords(str: string): string {
@@ -717,118 +834,3 @@ async function benchMark() {
 }
 
 benchMark();
-
-// else {
-//           const { data: priceNoDiscount } = await tryCatch(
-//             productPage.$eval(
-//               "div.woocommerce-variation-price span.electro-price ins span bdi",
-//               (price) => price?.textContent
-//             ),
-//             "from test " + originalName
-//           );
-
-//           if (priceNoDiscount) {
-//             prevPriceRead = priceNoDiscount;
-//             productVariations.push({
-//               [property]: variationValuesFromSelect[i],
-//               price: priceNoDiscount,
-//             });
-//           }
-//         }
-
-// if (
-//     variationValuesFromSelect !== null &&
-//     variationValuesFromSelect.every((vartn) => vartn !== null)
-//   ) {
-//     let prevPriceRead = "";
-//     for (let i = 0; i <= variationValuesFromSelect.length - 1; i++) {
-//       const { data: priceRange } = await tryCatch(
-//         productPage.$eval("p.price span.electro-price", (p) => p.textContent),
-//         "has pricerange"
-//       );
-
-//       if (
-//         priceRange !== null &&
-//         priceRange !== undefined &&
-//         !priceRange.includes("–")
-//       ) {
-//         const { data: initialPriceInfoWithDiscount } = await tryCatch(
-//           productPage.$eval("p.price span.electro-price ins span bdi", (itm) =>
-//             itm.textContent?.toLowerCase()
-//           )
-//         );
-//         if (
-//           initialPriceInfoWithDiscount !== null &&
-//           initialPriceInfoWithDiscount !== undefined
-//         ) {
-//           productVariations.push({
-//             [property]: variationValuesFromSelect[i],
-//             price: initialPriceInfoWithDiscount,
-//           });
-//         }
-//       } else {
-//         Promise.all([
-//           await tryCatch(
-//             productPage.waitForSelector(
-//               `table.variations select[id='${variations}`
-//             ),
-//             "3?"
-//           ),
-//           await tryCatch(
-//             productPage.click(`table.variations select[id='${variations}']`),
-//             "1?"
-//           ),
-//         ]);
-
-//         await tryCatch(
-//           productPage.select(
-//             `table.variations select[id='${variations}']`,
-//             variationValuesFromSelect[i]
-//           ),
-//           "2?"
-//         );
-
-//         const { data: withDiscountPrice } = await tryCatch(
-//           productPage.$(
-//             "div.woocommerce-variation-price span.electro-price ins span bdi"
-//           )
-//         );
-
-//         await tryCatch(
-//           productPage.waitForSelector(
-//             "div.woocommerce-variation-price span.electro-price ins span bdi"
-//           ),
-//           "4?" + originalName
-//         );
-
-//         if (prevPriceRead !== "") {
-//           await productPage.waitForFunction(
-//             (sel, prev) => {
-//               const el = document.querySelector(sel);
-
-//               return el && el.textContent!.trim() !== prev;
-//             },
-//             { polling: "mutation", timeout: 6000 }, // optional options
-//             "div.woocommerce-variation-price span.electro-price ins span bdi",
-//             prevPriceRead
-//           );
-//         }
-
-//         const { data: price } = await tryCatch(
-//           productPage.$eval(
-//             "div.woocommerce-variation-price span.electro-price ins span bdi",
-//             (price) => price?.textContent
-//           ),
-//           `?5 ${originalName}`
-//         );
-
-//         if (price !== null) {
-//           prevPriceRead = price;
-//           productVariations.push({
-//             [property]: variationValuesFromSelect[i],
-//             price,
-//           });
-//         }
-//       }
-//     }
-//   }
