@@ -12,7 +12,7 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
-    "@tsconfig/node23": "^23.0.1",
+    "@tsconfig/node22": "^22.0.2",
     "@types/node": "^22.15.3",
     "@types/pg": "^8.12.0",
     "drizzle-kit": "^0.31.1",
@@ -27,9 +27,9 @@
   "dependencies": {
     "@types/puppeteer": "^5.4.7",
     "dotenv": "^16.5.0",
-    "drizzle-orm": "^0.43.1",
+    "drizzle-orm": "^0.44.2",
+    "pg": "^8.16.3",
     "groq-sdk": "^0.22.0",
-    "pg": "^8.15.6",
     "puppeteer": "^24.8.0"
   }
 }
