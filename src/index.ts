@@ -4,7 +4,8 @@ import { db } from "./db";
 import { tryCatch } from "./utils";
 import Groq from "groq-sdk";
 import util from "util";
-import { TGpu } from "#db/schema.js";
+import { gpusTable, soldByTable, TGpu, TSoldBy } from "#db/schema.ts";
+import { eq } from "drizzle-orm";
 
 const groqClient = new Groq({ apiKey: process.env.GROQ_KEY! });
 
@@ -20,7 +21,7 @@ type TVariation = {
   memory?: string;
   variant?: string;
   color?: string;
-  price: string;
+  price: number;
 };
 
 type TExtras = {
@@ -28,13 +29,13 @@ type TExtras = {
   additionalInfo?: string[]; // additional info is needed to get infos not found on original name
 };
 
-async function getAllData() {
+async function getAllData(): Promise<Array<any>> {
   const browser = await puppeteer.launch({
     headless: false,
   });
   const mainPage = await browser.newPage();
 
-  const allProducts: Omit<TGpu, "created_at" | "id">[] = [];
+  let allProducts: Array<Omit<TGpu, "id" | "created_at"> & TSoldBy> = [];
 
   mainPage.setViewport(pageDefualtViewPortSettings);
 
@@ -47,34 +48,27 @@ async function getAllData() {
   );
 
   while (true) {
-    // const productsWithLink: Pick<TGpu, "link">[] = await mainPage.$$eval(
-    //   "li.product.type-product",
-    //   allProductsEvalCallback
-    // );
-    const productsWithLink = [
-      {
-        link: "https://bermorzone.com.ph/shop/video-cards/amd-video-cards/sapphire-pulse-amd-radeon-rx-9060-xt-8gb-16gb-gddr6-graphics-card/",
-      },
-    ];
+    const productsWithLink: Pick<TSoldBy, "link">[] = await mainPage.$$eval(
+      "li.product.type-product",
+      allProductsEvalCallback
+    );
 
     const withOrigNameLinkPriceImageVariationAddInfo: Array<
       Promise<
-        Pick<TGpu, "original_name" | "price" | "image" | "link"> & {
-          variation?: TVariation[];
-          additionalInfo?: string[];
-        }
+        Pick<TGpu, "image"> &
+          Pick<TSoldBy, "original_name" | "price" | "link"> &
+          TExtras
       >
     > = productsWithLink.map(async (p) => {
       const productImageSet = new Set<string>();
-      const productInfo: Pick<
-        TGpu,
-        "original_name" | "price" | "image" | "link"
-      > &
+      const productInfo: Pick<TGpu, "image"> &
+        Pick<TSoldBy, "original_name" | "price" | "link"> &
         TExtras = {
         ...p,
         original_name: "",
-        price: "",
+        price: 0,
         image: "",
+        variation: [],
       };
 
       const productPage = await browser.newPage();
@@ -100,9 +94,6 @@ async function getAllData() {
       );
 
       if (originalName !== null) {
-        // initialProductInfo.brand = getGpuBrand(originalName);
-        // initialProductInfo.manufacturer = getManufacturer(originalName);
-        // initialProductInfo.identifier = getGpuIdentifier(originalName);
         productInfo.original_name = originalName;
 
         await tryCatch(
@@ -125,30 +116,16 @@ async function getAllData() {
           productImage.split("/")[productImage.split("/").length - 1];
       }
 
-      const { data: initialPriceInfoWithDiscount } = await tryCatch(
-        productPage.$eval("p.price span.electro-price ins span bdi", (itm) =>
-          itm.textContent?.toLowerCase()
+      const { data: initialPriceInfo } = await tryCatch(
+        productPage.$eval("p.price span.electro-price", (itm) =>
+          itm.querySelector("ins span bdi") !== null
+            ? itm.querySelector("ins span bdi")?.textContent
+            : itm.querySelector("bdi")?.textContent
         )
       );
 
-      const { data: initialPriceInfoNoDiscount } = await tryCatch(
-        productPage.$eval("p.price span.electro-price bdi", (itm) =>
-          itm.textContent?.toLowerCase()
-        )
-      );
-
-      if (
-        initialPriceInfoWithDiscount !== null &&
-        initialPriceInfoWithDiscount !== undefined
-      ) {
-        productInfo.price = initialPriceInfoWithDiscount;
-      }
-
-      if (
-        initialPriceInfoNoDiscount !== null &&
-        initialPriceInfoNoDiscount !== undefined
-      ) {
-        productInfo.price = initialPriceInfoNoDiscount;
+      if (initialPriceInfo !== null && initialPriceInfo !== undefined) {
+        productInfo.price = normalizePrice(initialPriceInfo);
       }
 
       const { data: variations, error: _variationsError } = await tryCatch(
@@ -243,7 +220,7 @@ async function getAllData() {
 
       if (productImageSet.size >= 1) {
         const allImages = [...productImageSet].filter((itm) =>
-          itm.includes(productInfo.image)
+          itm.includes(productInfo.image!)
         );
         productInfo.image = allImages[0];
       }
@@ -269,24 +246,76 @@ async function getAllData() {
         memory_type: getMemoryType(p.original_name),
       }));
 
-    const withUniqueVariation =
-      withGenModlMnfctrIdntfrBrndMemSizeMemType.filter(
-        (itm) =>
-          itm.variation !== undefined &&
-          itm.variation.every(
-            (i) =>
-              i.variant !== undefined && !i.variant.toLowerCase().includes("oc")
-          )
-      );
-    // .map((i) => ({
-    //   link: i.link,
-    //   original_name: i.original_name,
-    //   variation: i.variation,
-    // }));
+    const sanitized = withGenModlMnfctrIdntfrBrndMemSizeMemType.reduce<any>(
+      (acc: Array<TGpu & Omit<TSoldBy, "identifier_id">>, curr) => {
+        const { variation, additionalInfo, ...requiredDetails } = curr;
+        if (variation !== undefined && variation!.length >= 1) {
+          if (variation.every((v) => v.color !== undefined)) {
+            for (const v of variation) {
+              acc.push({
+                ...requiredDetails,
+                identifier: `${curr.identifier}(${v.color})`,
+                price: v.price,
+                vendor_name: "BTZ",
+              });
+            }
+          }
+          if (variation.every((v) => v.memory !== undefined)) {
+            for (const v of variation) {
+              acc.push({
+                ...requiredDetails,
+                identifier: `${curr.identifier}(${v.memory})`,
+                price: v.price,
+                memory_size:
+                  v.memory !== undefined && v.memory.match(/\s?G(?:B)?\b/gi)
+                    ? parseInt(v.memory.replace(/\s?G(?:B)?\b/gi, ""))
+                    : parseInt(v.memory!),
+                vendor_name: "BTZ",
+              });
+            }
+          }
+        } else {
+          acc.push({
+            ...requiredDetails,
+            vendor_name: "BTZ",
+          });
+        }
+
+        return acc;
+      },
+      []
+    );
 
     console.log(
-      util.inspect(withGenModlMnfctrIdntfrBrndMemSizeMemType, { depth: null }),
+      util.inspect(sanitized, { depth: null }),
       "withGenModMnfctrIdntfrBrndMemSizeMemType"
+    );
+
+    allProducts = [...allProducts, ...sanitized];
+
+    await db.insert(gpusTable).values(
+      sanitized.map((g: any) => ({
+        // original_name: g.original_name,
+        identifier: g.identifier,
+        general_model: g.general_model,
+        image: g.image,
+        brand: g.brand,
+        power_consumption: null,
+        manufacturer: g.manufacturer,
+        memory_type: g.memory_type,
+        memory_size: !Number.isNaN(g.memory_size) ? g.memory_size : 0,
+        dimensions: null,
+      }))
+    );
+
+    await db.insert(soldByTable).values(
+      sanitized.map((g: any) => ({
+        identifier_id: g.identifier,
+        link: g.link,
+        original_name: g.original_name,
+        price: g.price,
+        vendor_name: g.vendor_name,
+      }))
     );
 
     const { data: nextButton } = await tryCatch(
@@ -310,6 +339,7 @@ async function getAllData() {
     util.inspect(allProducts, { depth: null }),
     "product w variation"
   );
+  return allProducts;
 }
 
 function getGeneralModel(originalName: string): string {
@@ -331,7 +361,7 @@ function getGeneralModel(originalName: string): string {
     generalModelInParts.push(performanceSuffixMatch[0]);
   }
 
-  return generalModelInParts.join(" ");
+  return generalModelInParts.join(" ").toUpperCase();
 }
 
 function getMemoryType(originalName: string): string {
@@ -351,7 +381,7 @@ function getMemorySize(originalName: string): number {
   const memorySizeMatch = originalName.match(/\b(\d+)\s?G[B]?\b/gi);
 
   if (memorySizeMatch !== null) {
-    memorySize = memorySizeMatch[0];
+    memorySize = memorySizeMatch[0].replace(/\s?G(?:B)?\b/gi, "");
   }
 
   return parseInt(memorySize);
@@ -361,8 +391,8 @@ async function handleMultiProductVariation(
   productPage: Page,
   variations: string[],
   originalName: string
-): Promise<{ variant: string; price: string }[]> {
-  let productVariations: { variant: string; price: string }[] = [];
+): Promise<{ variant: string; price: number }[]> {
+  let productVariations: { variant: string; price: number }[] = [];
 
   for (const v of variations) {
     const { data: variationValues } = await tryCatch(
@@ -436,11 +466,11 @@ async function handleMultiProductVariation(
             `?5 ${originalName}`
           );
 
-          if (price !== null || price !== undefined) {
+          if (price !== null && price !== undefined) {
             prevPriceRead = evaluatorCondition!;
             productVariations.push({
               variant: variationValues[i],
-              price: price!,
+              price: normalizePrice(price),
             });
           }
         }
@@ -456,8 +486,8 @@ async function handleProductVariation(
   variation: string,
   originalName: string,
   property: "memory" | "color" | "variant"
-): Promise<{ [property]: string; price: string }[]> {
-  let productVariations: { [property]: string; price: string }[] = [];
+): Promise<{ [property]: string; price: number }[]> {
+  let productVariations: { [property]: string; price: number }[] = [];
 
   // productName = productName.replace(/\d+GB\s*\|\s*\d+GB/g, "");
 
@@ -480,7 +510,7 @@ async function handleProductVariation(
     if (variationValues.length === 1) {
       productVariations.push({
         [property]: variationValues[0],
-        price: nonVariationPrice!,
+        price: normalizePrice(nonVariationPrice!),
       });
     } else if (variationValues.length === 2) {
       for (let i = 0; i <= variationValues.length - 1; i++) {
@@ -489,13 +519,13 @@ async function handleProductVariation(
           if (priceRange.length === 2) {
             productVariations.push({
               [property]: variationValues[i],
-              price: priceRange[i],
+              price: normalizePrice(priceRange[i]),
             });
           } else {
             const priceWithDiscount = nonVariationPrice.split(" ");
             productVariations.push({
               [property]: variationValues[i],
-              price: priceWithDiscount[0],
+              price: normalizePrice(priceWithDiscount[0]),
             });
           }
         }
@@ -571,7 +601,7 @@ async function handleProductVariation(
           prevPriceRead = evaluatorCondition!;
           productVariations.push({
             [property]: variationValues[i],
-            price: price!,
+            price: normalizePrice(price!),
           });
         }
       }
@@ -581,13 +611,21 @@ async function handleProductVariation(
   return productVariations;
 }
 
+const normalizePrice = (price: string): number => {
+  return parseInt(price.replace("₱", "").replace(",", ""));
+};
+
 const modelMatcher =
   // /(?<=\b(?:GTX|RTX|GT|RX)\s*)\d{3,4}\b|\b(?:ARC\s*)?(?:A|B)\d{3}\b/gi;
-  // /(?<=\b(?:GTX|RTX|GT|RX)\s*)\d{3,4}\b|\b[AB]\d{3}\b/gi;
-  /\b(?=GTX|RTX|GT|RX)?(\d{3,4})(?=XT|TI|SUPER|OC)?|(?=ARC)?(?:A|B)\d{3}\b/gi;
-const familyMatcher = /\b(?=GTX|RTX|GT|RX)?(\d{3,4})(?=XT|TI|SUPER|OC)?/gi;
+  /(?<=\b(?:GTX|RTX|GT|RX)\s*)\d{3,4}\b|\b[AB]\d{3}\b/gi;
+// /\b(?=GTX|RTX|GT|RX)?(\d{3,4})(?=XT|TI|SUPER|OC)?|(?=ARC)?(?:A|B)\d{3}\b/gi;
+const familyMatcher =
+  // /\b(?=GTX|RTX|GT|RX)?(\d{3,4})(?=XT|TI|SUPER|OC)?|(?=ARC)?(?:A|B)\d{3}\b/gi;
+  // /\b(?=GTX|RTX|GT|RX)?(\d{3,4})(?=XT|TI|SUPER|OC)?/gi;
+  /\b(RTX|ARC|GTX|RX)\b/i;
+
 const performanceSuffixMatcher =
-  /(?=\d{4})?(?:TI(?:\s+SUPER)?|SUPER(?:\s+TI)?|XT(?:\s{0,1}X)?)\b/i;
+  /(?=\d{4})?(?:TI(?:\s+SUPER)?|SUPER(?:\s+TI)?|XT(?:\s{0,1}X)?)|GRE\b/i;
 
 function getGpuIdentifier(originalName: string): string {
   let gpuNameInParts: string[] = [
@@ -609,7 +647,7 @@ function getGpuIdentifier(originalName: string): string {
 
   if (performanceSuffixMatch !== null) {
     let suffix = performanceSuffixMatch[0];
-    if (performanceSuffixMatch.length >= 2) {
+    if (performanceSuffixMatch[0].split(" ").length >= 2) {
       suffix = performanceSuffixMatch.join("_");
     }
     gpuNameInParts.push(suffix);
@@ -647,7 +685,7 @@ const GIGABYTE_SERIES_MATCHER =
 const ASROCK_SERIES_MATCHER =
   /\b(?:aqua|formula|phantom|gaming|steel|legend|challenger|creator|passive)/gi;
 
-const COLORFUL_SERIES_MATCHER = /\b(?:igame|colorfire)/gi;
+const COLORFUL_SERIES_MATCHER = /\b(?:igame|colorfire|battle|ax|duo|ultra)/gi;
 
 const GALAX_SERIES_MATCHER = /\b(?:ex|gamer|1-click)/gi;
 
@@ -795,23 +833,6 @@ function getManufacturer(originalName: string): string {
     : splitted[1];
 }
 
-function initialRemoveUnnecessaryKeywords(str: string): string {
-  return str
-    .replace("Graphics Card", "")
-    .replace("Video Card", "")
-    .replace("GeForce", "")
-    .replace(/GDDR\d+X?/i, "");
-}
-
-function finalRemovalUnnecessaryKeywords(str: string): string {
-  return str
-    .replace(/\s{2,}/, " ")
-    .replace("|", "")
-    .replace(/\d+\s*-?\s*bit/i, "")
-    .replace(/\s{2,}/, " ")
-    .trim();
-}
-
 function allProductsEvalCallback(products: HTMLElement[]) {
   return products.map((product) => {
     const linkSelector =
@@ -825,7 +846,13 @@ function allProductsEvalCallback(products: HTMLElement[]) {
 async function benchMark() {
   const startTime = Date.now();
 
-  await getAllData();
+  // await getAllData();
+  const data = await db
+    .select()
+    .from(gpusTable)
+    .leftJoin(soldByTable, eq(soldByTable.identifier_id, gpusTable.identifier));
+
+  console.log(util.inspect(data, { depth: null }), "data");
 
   const endTime = Date.now();
   const durationMilliseconds = endTime - startTime;
