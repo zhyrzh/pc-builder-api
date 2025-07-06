@@ -1,9 +1,13 @@
 {
-  "extends": "@tsconfig/node23/tsconfig.json",
+  "extends": "@tsconfig/node22/tsconfig.json",
   "compilerOptions": {
+    "lib": ["ESNext", "DOM"],
     "outDir": "./dist",
-    "rootDir": "./"
+    "rootDir": "./",
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+    // "strictNullChecks": true
   },
-  "include": ["**/*.ts"],
-  "exclude": ["dist"]
+  "include": ["src/**/*"],
+  "exclude": ["dist", "node_modules"]
 }
