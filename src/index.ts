@@ -6,6 +6,15 @@ import Groq from "groq-sdk";
 import util from "util";
 import { gpusTable, soldByTable, TGpu, TSoldBy } from "#db/schema.ts";
 import { eq } from "drizzle-orm";
+import {
+  getGeneralModel,
+  getGpuBrand,
+  getGpuIdentifier,
+  getManufacturer,
+  getMemorySize,
+  getMemoryType,
+  normalizePrice,
+} from "#utils/helpers.ts";
 
 const groqClient = new Groq({ apiKey: process.env.GROQ_KEY! });
 
@@ -293,31 +302,6 @@ async function getAllData(): Promise<Array<any>> {
 
     allProducts = [...allProducts, ...sanitized];
 
-    await db.insert(gpusTable).values(
-      sanitized.map((g: any) => ({
-        // original_name: g.original_name,
-        identifier: g.identifier,
-        general_model: g.general_model,
-        image: g.image,
-        brand: g.brand,
-        power_consumption: null,
-        manufacturer: g.manufacturer,
-        memory_type: g.memory_type,
-        memory_size: !Number.isNaN(g.memory_size) ? g.memory_size : 0,
-        dimensions: null,
-      }))
-    );
-
-    await db.insert(soldByTable).values(
-      sanitized.map((g: any) => ({
-        identifier_id: g.identifier,
-        link: g.link,
-        original_name: g.original_name,
-        price: g.price,
-        vendor_name: g.vendor_name,
-      }))
-    );
-
     const { data: nextButton } = await tryCatch(
       mainPage.$("nav.electro-advanced-pagination a.next.page-numbers"),
       "nextb"
@@ -342,51 +326,6 @@ async function getAllData(): Promise<Array<any>> {
   return allProducts;
 }
 
-function getGeneralModel(originalName: string): string {
-  let generalModelInParts: string[] = [];
-
-  const familyMatch = originalName.match(familyMatcher);
-  const seriesMatch = originalName.match(modelMatcher);
-  const performanceSuffixMatch = originalName.match(performanceSuffixMatcher);
-
-  if (familyMatch !== null) {
-    generalModelInParts.push(familyMatch[0]);
-  }
-
-  if (seriesMatch !== null) {
-    generalModelInParts.push(seriesMatch[0]);
-  }
-
-  if (performanceSuffixMatch !== null) {
-    generalModelInParts.push(performanceSuffixMatch[0]);
-  }
-
-  return generalModelInParts.join(" ").toUpperCase();
-}
-
-function getMemoryType(originalName: string): string {
-  let memoryType = "";
-  const memoryTypeMatch = originalName.match(/\bGDDR\d{1,2}X?\b/i);
-
-  if (memoryTypeMatch !== null) {
-    memoryType = memoryTypeMatch[0];
-  }
-
-  return memoryType;
-}
-
-function getMemorySize(originalName: string): number {
-  let memorySize = "";
-  // const memorySizeMatch = originalName.match(/\b\d{1,2}\s*GB?\b/i);
-  const memorySizeMatch = originalName.match(/\b(\d+)\s?G[B]?\b/gi);
-
-  if (memorySizeMatch !== null) {
-    memorySize = memorySizeMatch[0].replace(/\s?G(?:B)?\b/gi, "");
-  }
-
-  return parseInt(memorySize);
-}
-
 async function handleMultiProductVariation(
   productPage: Page,
   variations: string[],
@@ -407,33 +346,9 @@ async function handleMultiProductVariation(
     if (variationValues !== null && variationValues.every((i) => i !== null)) {
       let prevPriceRead = "";
       for (let i = 0; i <= variationValues.length - 1; i++) {
-        Promise.all([
-          await tryCatch(
-            productPage.waitForSelector(`table.variations select[id='${v}`),
-            "3?"
-          ),
-          await tryCatch(
-            productPage.click(`table.variations select[id='${v}']`),
-            "1?"
-          ),
-        ]);
-
-        await tryCatch(
-          productPage.select(
-            `table.variations select[id='${v}']`,
-            variationValues[i]
-          ),
-          "2?"
-        );
+        await selectHandler(productPage, v, variationValues[i]);
 
         if (!v.toLowerCase().includes("brand")) {
-          await tryCatch(
-            productPage.waitForSelector(
-              "div.woocommerce-variation-price span.electro-price ins span bdi"
-            ),
-            "4?" + originalName
-          );
-
           if (prevPriceRead !== "") {
             await productPage.waitForFunction(
               (sel1, prev) => {
@@ -489,8 +404,6 @@ async function handleProductVariation(
 ): Promise<{ [property]: string; price: number }[]> {
   let productVariations: { [property]: string; price: number }[] = [];
 
-  // productName = productName.replace(/\d+GB\s*\|\s*\d+GB/g, "");
-
   const { data: variationValues } = await tryCatch(
     productPage.$$eval(
       `table.variations td.value select[id='${variation}'] option`,
@@ -533,37 +446,7 @@ async function handleProductVariation(
     } else {
       let prevPriceRead = "";
       for (let i = 0; i <= variationValues.length - 1; i++) {
-        Promise.all([
-          await tryCatch(
-            productPage.waitForSelector(
-              `table.variations select[id='${variation}`
-            ),
-            "3?"
-          ),
-          await tryCatch(
-            productPage.click(`table.variations select[id='${variation}']`),
-            "1?"
-          ),
-        ]);
-
-        await tryCatch(
-          productPage.select(
-            `table.variations select[id='${variation}']`,
-            variationValues[i]
-          ),
-          "2?"
-        );
-
-        // const { data: withDiscountPrice } = await tryCatch(
-        //   productPage.$("div.woocommerce-variation-price span.electro-price")
-        // );
-
-        await tryCatch(
-          productPage.waitForSelector(
-            "div.woocommerce-variation-price span.electro-price ins span bdi"
-          ),
-          "4?" + originalName
-        );
+        await selectHandler(productPage, variation, variationValues[i]);
 
         if (prevPriceRead !== "") {
           await productPage.waitForFunction(
@@ -611,226 +494,33 @@ async function handleProductVariation(
   return productVariations;
 }
 
-const normalizePrice = (price: string): number => {
-  return parseInt(price.replace("₱", "").replace(",", ""));
-};
+async function selectHandler(
+  page: Page,
+  variation: string,
+  selectValue: string
+) {
+  Promise.all([
+    await tryCatch(
+      page.waitForSelector(`table.variations select[id='${variation}`),
+      "3?"
+    ),
+    await tryCatch(
+      page.click(`table.variations select[id='${variation}']`),
+      "1?"
+    ),
+  ]);
 
-const modelMatcher =
-  // /(?<=\b(?:GTX|RTX|GT|RX)\s*)\d{3,4}\b|\b(?:ARC\s*)?(?:A|B)\d{3}\b/gi;
-  /(?<=\b(?:GTX|RTX|GT|RX)\s*)\d{3,4}\b|\b[AB]\d{3}\b/gi;
-// /\b(?=GTX|RTX|GT|RX)?(\d{3,4})(?=XT|TI|SUPER|OC)?|(?=ARC)?(?:A|B)\d{3}\b/gi;
-const familyMatcher =
-  // /\b(?=GTX|RTX|GT|RX)?(\d{3,4})(?=XT|TI|SUPER|OC)?|(?=ARC)?(?:A|B)\d{3}\b/gi;
-  // /\b(?=GTX|RTX|GT|RX)?(\d{3,4})(?=XT|TI|SUPER|OC)?/gi;
-  /\b(RTX|ARC|GTX|RX)\b/i;
+  await tryCatch(
+    page.select(`table.variations select[id='${variation}']`, selectValue),
+    "2?"
+  );
 
-const performanceSuffixMatcher =
-  /(?=\d{4})?(?:TI(?:\s+SUPER)?|SUPER(?:\s+TI)?|XT(?:\s{0,1}X)?)|GRE\b/i;
-
-function getGpuIdentifier(originalName: string): string {
-  let gpuNameInParts: string[] = [
-    getManufacturer(originalName),
-    getGpuBrand(originalName),
-  ];
-
-  let familyMatch = originalName.match(familyMatcher);
-  let modelMatch = originalName.match(modelMatcher);
-  let performanceSuffixMatch = originalName.match(performanceSuffixMatcher);
-
-  if (familyMatch !== null) {
-    gpuNameInParts.push(familyMatch[0]);
-  }
-
-  if (modelMatch !== null) {
-    gpuNameInParts.push(modelMatch[0]);
-  }
-
-  if (performanceSuffixMatch !== null) {
-    let suffix = performanceSuffixMatch[0];
-    if (performanceSuffixMatch[0].split(" ").length >= 2) {
-      suffix = performanceSuffixMatch.join("_");
-    }
-    gpuNameInParts.push(suffix);
-  }
-
-  const series = getSeriesByBrand(originalName);
-
-  if (series !== "") {
-    gpuNameInParts.push(series);
-  }
-
-  return gpuNameInParts.join("-").toUpperCase();
-}
-
-const MSI_SERIES_MATCHER =
-  /\b(?:suprim|vanguard|expert|gaming|slim|inspire|ventus|shadow)\b/gi;
-
-const ASUS_SERIES_MATCHER =
-  /\b(?:astral|matrix|strix|tuf|gaming|proart|prime|ko|dual|mini|turbo|phoenix)\b/gi;
-
-const PALIT_SERIES_MATCHER =
-  /\b(?:gamerock|gamingpro|jetstream|dual|infinity|stormx)\b/i;
-
-const SAPPHIRE_SERIES_MATCHER = /\b(?:toxic|pure|nitro|pulse)/i;
-
-const ZOTAC_SERIES_MATCHER =
-  /\b(?:zone|gaming|twin|eco|solo|solid|edge|amp|trinity|extreme|airo|infinity|ultra|core|sff|spider-man)\b/gi;
-
-const INNO3D_SERIES_MATCHER =
-  /\b(?:twin|x2|compact|ichill|x3|frostbite|gaming|ultra)/gi;
-
-const GIGABYTE_SERIES_MATCHER =
-  /\b(?:d6|mini|itx|gaming|xtr|turbo|pro|master|stealth|elite|vision|xtreme|windforce|waterforce|ice|eagle|low|profile)/gi;
-
-const ASROCK_SERIES_MATCHER =
-  /\b(?:aqua|formula|phantom|gaming|steel|legend|challenger|creator|passive)/gi;
-
-const COLORFUL_SERIES_MATCHER = /\b(?:igame|colorfire|battle|ax|duo|ultra)/gi;
-
-const GALAX_SERIES_MATCHER = /\b(?:ex|gamer|1-click)/gi;
-
-const POWERCOLOR_SERIES_MATCHER =
-  /\b(?:figher|spectral|hellhound|itx|liquid|devil|low|profile|reaper|red|devil|red|dragon)/gi;
-
-const XFX_SERIES_MATCHER =
-  /\b(?:speedster|swift|mercury|quicksilver|qick\s{0,1}\d{3}|merc\s{0,1}\d{3}|core)/gi;
-
-const PNY_SERIES_MATCHER = /\b(?:verto|xlr8|epic-x)/gi;
-
-function getSeriesByBrand(originalName: string): string {
-  let series = "";
-  let manufacturer = getManufacturer(originalName);
-
-  if (manufacturer.toLowerCase() === "msi") {
-    const msiSeries = originalName.match(MSI_SERIES_MATCHER);
-    if (msiSeries !== null && msiSeries.length >= 1) {
-      series = seriesKeysHandler(msiSeries);
-    }
-  }
-
-  if (manufacturer.toLowerCase() === "asus") {
-    const asusSeries = originalName.match(ASUS_SERIES_MATCHER);
-    if (asusSeries !== null && asusSeries.length >= 1) {
-      series = seriesKeysHandler(asusSeries);
-    }
-  }
-
-  if (manufacturer.toLowerCase() === "palit") {
-    const palitSeries = originalName.match(PALIT_SERIES_MATCHER);
-    if (palitSeries !== null && palitSeries.length >= 1) {
-      series = seriesKeysHandler(palitSeries);
-    }
-  }
-
-  if (manufacturer.toLowerCase() === "sapphire") {
-    const sapphireSeries = originalName.match(SAPPHIRE_SERIES_MATCHER);
-    if (sapphireSeries !== null && sapphireSeries.length >= 1) {
-      series = seriesKeysHandler(sapphireSeries);
-    }
-  }
-
-  if (manufacturer.toLowerCase() === "zotac") {
-    const zotacSeries = originalName.match(ZOTAC_SERIES_MATCHER);
-    if (zotacSeries !== null && zotacSeries.length >= 1) {
-      series = seriesKeysHandler(zotacSeries);
-    }
-  }
-
-  if (manufacturer.toLowerCase() === "inno3d") {
-    const inno3DSeries = originalName.match(INNO3D_SERIES_MATCHER);
-    if (inno3DSeries !== null && inno3DSeries.length >= 1) {
-      series = seriesKeysHandler(inno3DSeries);
-    }
-  }
-
-  if (manufacturer.toLowerCase() === "gigabyte") {
-    const gigabyteSeries = originalName.match(GIGABYTE_SERIES_MATCHER);
-    if (gigabyteSeries !== null && gigabyteSeries.length >= 1) {
-      series = seriesKeysHandler(gigabyteSeries);
-    }
-  }
-
-  if (manufacturer.toLowerCase() === "asrock") {
-    const asrockSeries = originalName.match(ASROCK_SERIES_MATCHER);
-    if (asrockSeries !== null && asrockSeries.length >= 1) {
-      series = seriesKeysHandler(asrockSeries);
-    }
-  }
-
-  if (manufacturer.toLowerCase() === "colorful") {
-    const colorfulSeries = originalName.match(COLORFUL_SERIES_MATCHER);
-    if (colorfulSeries !== null && colorfulSeries.length >= 1) {
-      series = seriesKeysHandler(colorfulSeries);
-    }
-  }
-
-  if (manufacturer.toLowerCase() === "galax") {
-    const galaxSeries = originalName.match(GALAX_SERIES_MATCHER);
-    if (galaxSeries !== null && galaxSeries.length >= 1) {
-      series = seriesKeysHandler(galaxSeries);
-    }
-  }
-
-  if (manufacturer.toLowerCase() === "powercolor") {
-    const powerColorSeries = originalName.match(POWERCOLOR_SERIES_MATCHER);
-    if (powerColorSeries !== null && powerColorSeries.length >= 1) {
-      series = seriesKeysHandler(powerColorSeries);
-    }
-  }
-
-  if (manufacturer.toLowerCase() === "xfx") {
-    const xfxSeries = originalName.match(XFX_SERIES_MATCHER);
-    if (xfxSeries !== null && xfxSeries.length >= 1) {
-      series = seriesKeysHandler(xfxSeries);
-    }
-  }
-
-  return series;
-}
-
-function seriesKeysHandler(series: RegExpMatchArray): string {
-  const seriesSet = new Set();
-  for (const key of series) {
-    seriesSet.add(key.toLowerCase());
-  }
-  return [...seriesSet].join("_");
-}
-
-function getGpuBrand(originalName: string): string {
-  let brand: "AMD" | "NVIDIA" | "INTEL" | "" = "";
-  if (
-    originalName.toLowerCase().includes("rtx") ||
-    originalName.toLowerCase().includes("gtx") ||
-    originalName.toLowerCase().includes("gt ") ||
-    originalName.toLowerCase().includes("nvidia") ||
-    originalName.toLowerCase().includes("geforce")
-  ) {
-    brand = "NVIDIA";
-  }
-
-  if (
-    originalName.toLowerCase().includes("rx") ||
-    originalName.toLowerCase().includes("amd")
-  ) {
-    brand = "AMD";
-  }
-
-  if (
-    originalName.toLowerCase().includes("arc") ||
-    originalName.toLowerCase().includes("intel")
-  ) {
-    brand = "INTEL";
-  }
-
-  return brand;
-}
-
-function getManufacturer(originalName: string): string {
-  const splitted = originalName.split(" ");
-
-  return splitted.length >= 1 && splitted[0].match(/\d{1,2}G/i) === null
-    ? splitted[0]
-    : splitted[1];
+  await tryCatch(
+    page.waitForSelector(
+      "div.woocommerce-variation-price span.electro-price ins span bdi"
+    ),
+    "4?"
+  );
 }
 
 function allProductsEvalCallback(products: HTMLElement[]) {
@@ -846,13 +536,13 @@ function allProductsEvalCallback(products: HTMLElement[]) {
 async function benchMark() {
   const startTime = Date.now();
 
-  // await getAllData();
-  const data = await db
-    .select()
-    .from(gpusTable)
-    .leftJoin(soldByTable, eq(soldByTable.identifier_id, gpusTable.identifier));
+  await getAllData();
+  // const data = await db
+  //   .select()
+  //   .from(gpusTable)
+  //   .leftJoin(soldByTable, eq(soldByTable.identifier_id, gpusTable.identifier));
 
-  console.log(util.inspect(data, { depth: null }), "data");
+  // console.log(util.inspect(data, { depth: null }), "data");
 
   const endTime = Date.now();
   const durationMilliseconds = endTime - startTime;
