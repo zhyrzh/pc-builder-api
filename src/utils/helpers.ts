@@ -1,15 +1,17 @@
 import {
+  AMD_MEMORY_TYPES,
   ASROCK_SERIES_MATCHER,
   ASUS_SERIES_MATCHER,
   COLORFUL_SERIES_MATCHER,
-  familyMatcher,
+  GPU_FAMILY_MATCHER,
   GALAX_SERIES_MATCHER,
   GIGABYTE_SERIES_MATCHER,
   INNO3D_SERIES_MATCHER,
-  modelMatcher,
+  GPU_MODEL_MATCHER,
   MSI_SERIES_MATCHER,
+  NVIDIA_MEMORY_TYPES,
   PALIT_SERIES_MATCHER,
-  performanceSuffixMatcher,
+  GPU_PERFORMANCE_SUFFIX_MATCHER,
   POWERCOLOR_SERIES_MATCHER,
   SAPPHIRE_SERIES_MATCHER,
   XFX_SERIES_MATCHER,
@@ -133,9 +135,11 @@ export function getGpuIdentifier(originalName: string): string {
     getGpuBrand(originalName),
   ];
 
-  let familyMatch = originalName.match(familyMatcher);
-  let modelMatch = originalName.match(modelMatcher);
-  let performanceSuffixMatch = originalName.match(performanceSuffixMatcher);
+  let familyMatch = originalName.match(GPU_FAMILY_MATCHER);
+  let modelMatch = originalName.match(GPU_MODEL_MATCHER);
+  let performanceSuffixMatch = originalName.match(
+    GPU_PERFORMANCE_SUFFIX_MATCHER
+  );
 
   if (familyMatch !== null) {
     gpuNameInParts.push(familyMatch[0]);
@@ -194,9 +198,11 @@ export function getGpuBrand(originalName: string): string {
 export function getGeneralModel(originalName: string): string {
   let generalModelInParts: string[] = [];
 
-  const familyMatch = originalName.match(familyMatcher);
-  const seriesMatch = originalName.match(modelMatcher);
-  const performanceSuffixMatch = originalName.match(performanceSuffixMatcher);
+  const familyMatch = originalName.match(GPU_FAMILY_MATCHER);
+  const seriesMatch = originalName.match(GALAX_SERIES_MATCHER);
+  const performanceSuffixMatch = originalName.match(
+    GPU_PERFORMANCE_SUFFIX_MATCHER
+  );
 
   if (familyMatch !== null) {
     generalModelInParts.push(familyMatch[0]);
@@ -213,12 +219,32 @@ export function getGeneralModel(originalName: string): string {
   return generalModelInParts.join(" ").toUpperCase();
 }
 
-export function getMemoryType(originalName: string): string {
+export function getMemoryType(
+  originalName: string,
+  brand: string,
+  general_model: string
+): string {
   let memoryType = "";
   const memoryTypeMatch = originalName.match(/\bGDDR\d{1,2}X?\b/i);
 
   if (memoryTypeMatch !== null) {
     memoryType = memoryTypeMatch[0];
+  }
+
+  if (memoryType === "") {
+    if (brand.toUpperCase() === "NVIDIA" && general_model) {
+      memoryType =
+        NVIDIA_MEMORY_TYPES[general_model as keyof typeof NVIDIA_MEMORY_TYPES];
+    }
+
+    if (brand.toUpperCase() === "AMD") {
+      memoryType =
+        AMD_MEMORY_TYPES[general_model as keyof typeof AMD_MEMORY_TYPES];
+    }
+
+    if (brand.toUpperCase() === "INTEL") {
+      memoryType = "GDDR6";
+    }
   }
 
   return memoryType;
