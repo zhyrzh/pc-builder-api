@@ -1,5 +1,5 @@
 export const MSI_SERIES_MATCHER =
-  /\b(?:suprim|vanguard|expert|gaming|x|slim|inspire|ventus|shadow)\b/gi;
+  /\b(?:suprim|vanguard|expert|gaming|x|slim|duke|inspire|ventus|shadow|sea|hawk|evoke|armor|mech|aero|itx|classic|se|liquid|soc|trio|2x|3x)\b/gi;
 
 export const ASUS_SERIES_MATCHER =
   /\b(?:astral|matrix|strix|tuf|gaming|proart|prime|ko|dual|mini|turbo|phoenix)\b/gi;
